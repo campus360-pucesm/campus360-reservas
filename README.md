@@ -35,5 +35,5 @@ uvicorn app.main:app --reload
 ## 👥 Integrantes del Equipo
 
 - Dev Principal: Santiago Esquetini Murillo
-- Product Owner del módulo:
+- Product Owner del módulo: Samuel Andres Vega Mendoza
 - Scrum Master asignado: Andrea Valentina Campaña Intriago
