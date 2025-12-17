@@ -1,295 +1,224 @@
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+"""
+Router de Reservas
+Endpoints para crear y gestionar reservas
+"""
+from fastapi import APIRouter, Depends, HTTPException, Query
 from supabase import Client
 from typing import Optional
-from datetime import date
-import math
+from datetime import date, time
+from pydantic import BaseModel, Field
 
-from app.dependencies import get_supabase, get_current_user, require_admin
-from app.services import ReservaService
-from app.schemas import (
-    ReservaCreate,
-    ReservaCancelar,
-    ReservaResponse,
-    ReservaDetalleResponse,
-    FiltroReservas,
-    MensajeResponse
-)
-from app.models import EstadoReserva, TipoRecurso
+from app.dependencies import get_supabase
+from app.services.services import ReservaService
 
 router = APIRouter(
     prefix="/reservas",
-    tags=["reservas"]
+    tags=["Reservas"]
 )
 
 
-@router.post("/", response_model=dict, status_code=status.HTTP_201_CREATED)
+# ==================== SCHEMAS ====================
+
+class CrearReservaRequest(BaseModel):
+    """Datos para crear una nueva reserva"""
+    recurso_id: str = Field(..., description="ID del recurso a reservar")
+    fecha: date = Field(..., description="Fecha de la reserva (YYYY-MM-DD)")
+    hora_inicio: str = Field(..., description="Hora de inicio (HH:MM)")
+    hora_fin: str = Field(..., description="Hora de fin (HH:MM)")
+    usuario_id: str = Field(..., description="ID del usuario")
+    usuario_nombre: str = Field(..., description="Nombre del usuario")
+    usuario_email: str = Field(..., description="Email del usuario")
+    motivo: Optional[str] = Field(None, description="Motivo de la reserva")
+    num_asistentes: int = Field(1, ge=1, description="Numero de asistentes esperados")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "recurso_id": "uuid-del-recurso",
+                "fecha": "2025-01-20",
+                "hora_inicio": "10:00",
+                "hora_fin": "12:00",
+                "usuario_id": "user-123",
+                "usuario_nombre": "Juan Perez",
+                "usuario_email": "juan@universidad.edu",
+                "motivo": "Clase de programacion",
+                "num_asistentes": 20
+            }
+        }
+
+
+class CancelarReservaRequest(BaseModel):
+    """Datos para cancelar una reserva"""
+    motivo: Optional[str] = Field(None, description="Motivo de la cancelacion")
+
+
+# ==================== ENDPOINTS ====================
+
+@router.post("/")
 async def crear_reserva(
-    reserva: ReservaCreate,
-    db: Client = Depends(get_supabase),
-    current_user: dict = Depends(get_current_user)
+    datos: CrearReservaRequest,
+    db: Client = Depends(get_supabase)
 ):
     """
-    Crea una nueva reserva.
+    Crea una nueva reserva de un recurso.
     
-    RF2.1 - Permite crear una reserva seleccionando un recurso y un horario disponible.
-    RF2.2 - Valida que el recurso siga disponible al momento de confirmar.
-    RF2.3 - Registra la reserva con toda su información.
-    RF2.5 - Bloquea la creación de reservas en horarios ya tomados.
+    El sistema validara:
+    - Que el recurso exista y este disponible
+    - Que no haya conflictos de horario
+    - Que el numero de asistentes no exceda la capacidad
     """
     service = ReservaService(db)
-    nueva_reserva, error = await service.crear_reserva(reserva, current_user["id"])
+    
+    # Parsear horas
+    try:
+        hora_inicio = time.fromisoformat(datos.hora_inicio)
+        hora_fin = time.fromisoformat(datos.hora_fin)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Formato de hora invalido. Use HH:MM")
+    
+    reserva, error = await service.crear_reserva(
+        recurso_id=datos.recurso_id,
+        usuario_id=datos.usuario_id,
+        usuario_nombre=datos.usuario_nombre,
+        usuario_email=datos.usuario_email,
+        fecha=datos.fecha,
+        hora_inicio=hora_inicio,
+        hora_fin=hora_fin,
+        motivo=datos.motivo,
+        num_asistentes=datos.num_asistentes
+    )
     
     if error:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=error
-        )
+        raise HTTPException(status_code=400, detail=error)
     
     return {
+        "success": True,
         "message": "Reserva creada exitosamente",
-        "reserva": nueva_reserva
+        "data": reserva
     }
 
 
-@router.get("/mis-reservas")
-async def listar_mis_reservas(
-    estado: Optional[EstadoReserva] = Query(None, description="Filtrar por estado"),
-    recurso_id: Optional[str] = Query(None, description="Filtrar por recurso"),
-    fecha_desde: Optional[date] = Query(None, description="Fecha desde"),
-    fecha_hasta: Optional[date] = Query(None, description="Fecha hasta"),
-    tipo_recurso: Optional[TipoRecurso] = Query(None, description="Tipo de recurso"),
-    page: int = Query(1, ge=1, description="Número de página"),
-    page_size: int = Query(10, ge=1, le=50, description="Elementos por página"),
-    db: Client = Depends(get_supabase),
-    current_user: dict = Depends(get_current_user)
+@router.get("/")
+async def listar_reservas(
+    usuario_id: Optional[str] = Query(None, description="Filtrar por usuario"),
+    fecha: Optional[date] = Query(None, description="Filtrar por fecha"),
+    tipo_recurso: Optional[str] = Query(None, description="Filtrar por tipo de recurso"),
+    estado: Optional[str] = Query(None, description="Filtrar por estado"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    db: Client = Depends(get_supabase)
 ):
     """
-    Lista las reservas del usuario autenticado.
-    
-    RF4.1 - Permite visualizar todas las reservas activas.
-    RF4.2 - Permite consultar historial de reservas pasadas.
-    RF4.3 - Permite filtrar por estado (activas, canceladas, finalizadas).
+    Lista reservas con filtros opcionales.
     """
-    filtros = FiltroReservas(
-        estado=estado,
-        recurso_id=recurso_id,
-        fecha_desde=fecha_desde,
-        fecha_hasta=fecha_hasta,
-        tipo_recurso=tipo_recurso
-    )
-    
     service = ReservaService(db)
-    reservas, total = await service.listar_reservas_usuario(
-        current_user["id"],
-        filtros,
-        page,
-        page_size
-    )
+    
+    if fecha:
+        reservas = await service.listar_reservas_por_fecha(fecha, tipo_recurso)
+        return {
+            "success": True,
+            "data": reservas,
+            "total": len(reservas)
+        }
+    
+    if usuario_id:
+        reservas, total = await service.listar_reservas_usuario(usuario_id, estado, page, page_size)
+        return {
+            "success": True,
+            "data": reservas,
+            "total": total,
+            "page": page,
+            "page_size": page_size
+        }
+    
+    # Si no hay filtros, retornar mensaje
+    return {
+        "success": True,
+        "message": "Proporcione usuario_id o fecha para filtrar reservas",
+        "data": []
+    }
+
+
+@router.get("/usuario/{usuario_id}")
+async def listar_reservas_usuario(
+    usuario_id: str,
+    estado: Optional[str] = Query(None, description="Filtrar por estado: confirmada, en_curso, completada, cancelada"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    db: Client = Depends(get_supabase)
+):
+    """
+    Lista todas las reservas de un usuario especifico.
+    """
+    service = ReservaService(db)
+    reservas, total = await service.listar_reservas_usuario(usuario_id, estado, page, page_size)
     
     return {
-        "items": reservas,
+        "success": True,
+        "data": reservas,
         "total": total,
         "page": page,
-        "page_size": page_size,
-        "total_pages": math.ceil(total / page_size) if total > 0 else 0
+        "page_size": page_size
     }
 
 
-@router.get("/activas")
-async def listar_reservas_activas(
-    db: Client = Depends(get_supabase),
-    current_user: dict = Depends(get_current_user)
+@router.get("/fecha/{fecha}")
+async def listar_reservas_fecha(
+    fecha: date,
+    tipo_recurso: Optional[str] = Query(None, description="Filtrar por tipo de recurso"),
+    db: Client = Depends(get_supabase)
 ):
     """
-    Lista solo las reservas activas del usuario (pendientes, confirmadas, en curso).
-    
-    RF4.1 - Visualizar reservas activas.
+    Lista todas las reservas de una fecha especifica.
+    Util para ver la ocupacion del dia.
     """
     service = ReservaService(db)
-    filtros = FiltroReservas()
-    
-    # Obtener reservas y filtrar por estados activos
-    reservas, _ = await service.listar_reservas_usuario(
-        current_user["id"],
-        None,
-        1,
-        100
-    )
-    
-    estados_activos = ["pendiente", "confirmada", "en_curso"]
-    reservas_activas = [r for r in reservas if r["estado"] in estados_activos]
+    reservas = await service.listar_reservas_por_fecha(fecha, tipo_recurso)
     
     return {
-        "items": reservas_activas,
-        "total": len(reservas_activas)
-    }
-
-
-@router.get("/historial")
-async def listar_historial_reservas(
-    page: int = Query(1, ge=1),
-    page_size: int = Query(10, ge=1, le=50),
-    db: Client = Depends(get_supabase),
-    current_user: dict = Depends(get_current_user)
-):
-    """
-    Lista el historial de reservas pasadas (completadas, canceladas, no_show).
-    
-    RF4.2 - Consultar historial de reservas pasadas.
-    """
-    service = ReservaService(db)
-    
-    reservas, total = await service.listar_reservas_usuario(
-        current_user["id"],
-        None,
-        1,
-        1000
-    )
-    
-    estados_pasados = ["completada", "cancelada", "no_show"]
-    historial = [r for r in reservas if r["estado"] in estados_pasados]
-    
-    # Paginación manual
-    start = (page - 1) * page_size
-    end = start + page_size
-    paginated = historial[start:end]
-    
-    return {
-        "items": paginated,
-        "total": len(historial),
-        "page": page,
-        "page_size": page_size,
-        "total_pages": math.ceil(len(historial) / page_size) if historial else 0
+        "success": True,
+        "fecha": fecha.isoformat(),
+        "data": reservas,
+        "total": len(reservas)
     }
 
 
 @router.get("/{reserva_id}")
 async def obtener_reserva(
     reserva_id: str,
-    db: Client = Depends(get_supabase),
-    current_user: dict = Depends(get_current_user)
+    db: Client = Depends(get_supabase)
 ):
     """
-    Obtiene los detalles de una reserva específica.
+    Obtiene los detalles de una reserva especifica.
+    Incluye informacion del recurso y estado de check-ins.
     """
     service = ReservaService(db)
-    reserva = await service.obtener_reserva_detalle(reserva_id)
+    reserva = await service.obtener_reserva(reserva_id)
     
     if not reserva:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Reserva no encontrada"
-        )
+        raise HTTPException(status_code=404, detail="Reserva no encontrada")
     
-    # Verificar permisos
-    if reserva["usuario_id"] != current_user["id"] and current_user["role"] not in ["admin", "docente"]:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="No tienes permiso para ver esta reserva"
-        )
-    
-    return reserva
+    return {"success": True, "data": reserva}
 
 
-@router.delete("/{reserva_id}", response_model=MensajeResponse)
+@router.delete("/{reserva_id}")
 async def cancelar_reserva(
     reserva_id: str,
-    datos: Optional[ReservaCancelar] = None,
-    db: Client = Depends(get_supabase),
-    current_user: dict = Depends(get_current_user)
+    usuario_id: str = Query(..., description="ID del usuario que cancela"),
+    motivo: Optional[str] = Query(None, description="Motivo de cancelacion"),
+    db: Client = Depends(get_supabase)
 ):
     """
     Cancela una reserva existente.
-    
-    RF2.4 - Permite cancelar una reserva activa.
-    RF2.6 - Actualiza el estado del recurso.
-    RF2.7 - Genera confirmación de cancelación.
+    Solo el usuario que creo la reserva puede cancelarla.
     """
     service = ReservaService(db)
-    
-    motivo = datos.motivo_cancelacion if datos else None
-    es_admin = current_user["role"] == "admin"
-    
-    success, message = await service.cancelar_reserva(
-        reserva_id,
-        current_user["id"],
-        motivo,
-        es_admin
-    )
+    success, mensaje = await service.cancelar_reserva(reserva_id, usuario_id, motivo)
     
     if not success:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=message
-        )
-    
-    return MensajeResponse(message=message, success=True)
-
-
-# ============================================
-# ENDPOINTS ADMINISTRATIVOS
-# ============================================
-
-@router.get("/admin/todas", dependencies=[Depends(require_admin)])
-async def listar_todas_reservas(
-    estado: Optional[EstadoReserva] = Query(None),
-    recurso_id: Optional[str] = Query(None),
-    fecha_desde: Optional[date] = Query(None),
-    fecha_hasta: Optional[date] = Query(None),
-    page: int = Query(1, ge=1),
-    page_size: int = Query(10, ge=1, le=100),
-    db: Client = Depends(get_supabase),
-    current_user: dict = Depends(require_admin)
-):
-    """
-    Lista todas las reservas del sistema (solo admin).
-    """
-    filtros = FiltroReservas(
-        estado=estado,
-        recurso_id=recurso_id,
-        fecha_desde=fecha_desde,
-        fecha_hasta=fecha_hasta
-    )
-    
-    service = ReservaService(db)
-    reservas, total = await service.listar_todas_reservas(filtros, page, page_size)
+        raise HTTPException(status_code=400, detail=mensaje)
     
     return {
-        "items": reservas,
-        "total": total,
-        "page": page,
-        "page_size": page_size,
-        "total_pages": math.ceil(total / page_size) if total > 0 else 0
+        "success": True,
+        "message": mensaje
     }
-
-
-@router.patch("/admin/{reserva_id}/estado", dependencies=[Depends(require_admin)])
-async def cambiar_estado_reserva(
-    reserva_id: str,
-    nuevo_estado: EstadoReserva,
-    db: Client = Depends(get_supabase),
-    current_user: dict = Depends(require_admin)
-):
-    """
-    Cambia el estado de una reserva (solo admin).
-    """
-    try:
-        response = db.table("reservas").update({
-            "estado": nuevo_estado.value
-        }).eq("id", reserva_id).execute()
-        
-        if not response.data:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Reserva no encontrada"
-            )
-        
-        return {
-            "message": f"Estado actualizado a {nuevo_estado.value}",
-            "reserva": response.data[0]
-        }
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
-        )

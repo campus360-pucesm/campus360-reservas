@@ -1,55 +1,46 @@
+"""
+Servicios de Logica de Negocio para el Modulo de Reservas
+ACTUALIZADO con control de capacidad en check-ins
+"""
 from datetime import date, time, datetime, timedelta
 from typing import Optional, List, Tuple
 from supabase import Client
 import hashlib
 import secrets
-import qrcode
-import io
-import base64
 
 from app.config import get_settings
-from app.models import TipoRecurso, EstadoRecurso, EstadoReserva
-from app.schemas import (
-    RecursoCreate, RecursoUpdate, RecursoResponse,
-    ReservaCreate, ReservaResponse, ReservaDetalleResponse,
-    FiltroRecursos, FiltroReservas,
-    CheckinResponse
-)
 
 settings = get_settings()
 
 
 class RecursoService:
-    """Servicio para gestión de recursos"""
+    """Servicio para gestion de recursos"""
     
     def __init__(self, db: Client):
         self.db = db
     
     async def listar_recursos(
         self,
-        filtros: Optional[FiltroRecursos] = None,
+        tipo: Optional[str] = None,
+        estado: Optional[str] = None,
         page: int = 1,
-        page_size: int = 10
+        page_size: int = 50
     ) -> Tuple[List[dict], int]:
         """Lista recursos con filtros opcionales"""
         query = self.db.table("recursos").select("*", count="exact")
         
-        if filtros:
-            if filtros.tipo:
-                query = query.eq("tipo", filtros.tipo.value)
-            if filtros.tipo_equipo:
-                query = query.eq("tipo_equipo", filtros.tipo_equipo.value)
-            if filtros.estado:
-                query = query.eq("estado", filtros.estado.value)
-            if filtros.ubicacion:
-                query = query.ilike("ubicacion", f"%{filtros.ubicacion}%")
-            if filtros.capacidad_minima:
-                query = query.gte("capacidad", filtros.capacidad_minima)
+        if tipo:
+            query = query.eq("tipo", tipo)
+        if estado:
+            query = query.eq("estado", estado)
+        else:
+            # Por defecto solo mostrar disponibles
+            query = query.eq("estado", "disponible")
         
-        # Paginación
+        # Paginacion
         offset = (page - 1) * page_size
         query = query.range(offset, offset + page_size - 1)
-        query = query.order("nombre")
+        query = query.order("codigo")
         
         response = query.execute()
         return response.data, response.count or 0
@@ -59,39 +50,10 @@ class RecursoService:
         response = self.db.table("recursos").select("*").eq("id", recurso_id).single().execute()
         return response.data
     
-    async def crear_recurso(self, recurso: RecursoCreate) -> dict:
-        """Crea un nuevo recurso"""
-        data = recurso.model_dump()
-        
-        # Convertir time a string para Supabase
-        data["horario_inicio"] = data["horario_inicio"].isoformat()
-        data["horario_fin"] = data["horario_fin"].isoformat()
-        data["estado"] = EstadoRecurso.DISPONIBLE.value
-        
-        response = self.db.table("recursos").insert(data).execute()
-        return response.data[0]
-    
-    async def actualizar_recurso(self, recurso_id: str, recurso: RecursoUpdate) -> dict:
-        """Actualiza un recurso existente"""
-        data = recurso.model_dump(exclude_unset=True)
-        
-        # Convertir time a string si existe
-        if "horario_inicio" in data and data["horario_inicio"]:
-            data["horario_inicio"] = data["horario_inicio"].isoformat()
-        if "horario_fin" in data and data["horario_fin"]:
-            data["horario_fin"] = data["horario_fin"].isoformat()
-        if "estado" in data and data["estado"]:
-            data["estado"] = data["estado"].value
-        
-        response = self.db.table("recursos").update(data).eq("id", recurso_id).execute()
-        return response.data[0]
-    
-    async def eliminar_recurso(self, recurso_id: str) -> bool:
-        """Elimina un recurso (soft delete poniendo fuera_servicio)"""
-        self.db.table("recursos").update({
-            "estado": EstadoRecurso.FUERA_SERVICIO.value
-        }).eq("id", recurso_id).execute()
-        return True
+    async def obtener_recurso_por_codigo(self, codigo: str) -> Optional[dict]:
+        """Obtiene un recurso por su codigo (ej: SAL-001)"""
+        response = self.db.table("recursos").select("*").eq("codigo", codigo).single().execute()
+        return response.data
     
     async def obtener_disponibilidad(
         self,
@@ -99,43 +61,42 @@ class RecursoService:
         fecha: date
     ) -> dict:
         """Obtiene la disponibilidad de un recurso para una fecha"""
-        # Obtener recurso
         recurso = await self.obtener_recurso(recurso_id)
         if not recurso:
             return None
         
-        # Verificar si el día está disponible
-        dia_semana = fecha.isoweekday()  # 1=Lunes, 7=Domingo
-        if dia_semana not in recurso.get("dias_disponibles", [1, 2, 3, 4, 5]):
+        # Verificar si el dia esta disponible
+        dia_semana = fecha.isoweekday()
+        if dia_semana not in recurso.get("dias_disponibles", [1, 2, 3, 4, 5, 6]):
             return {
                 "recurso": recurso,
+                "fecha": fecha.isoformat(),
                 "disponible": False,
-                "mensaje": "El recurso no está disponible este día de la semana",
+                "mensaje": "El recurso no esta disponible este dia de la semana",
                 "horarios_disponibles": [],
                 "horarios_ocupados": []
             }
         
-        # Obtener reservas del día
-        reservas = self.db.table("reservas").select("hora_inicio, hora_fin, estado")\
+        # Obtener reservas del dia
+        reservas = self.db.table("reservas").select("hora_inicio, hora_fin, estado, motivo")\
             .eq("recurso_id", recurso_id)\
             .eq("fecha", fecha.isoformat())\
-            .not_.in_("estado", ["cancelada", "no_show"])\
+            .neq("estado", "cancelada")\
             .execute()
-        
-        # Calcular slots disponibles
-        horario_inicio = datetime.strptime(recurso["horario_inicio"], "%H:%M:%S").time()
-        horario_fin = datetime.strptime(recurso["horario_fin"], "%H:%M:%S").time()
         
         horarios_ocupados = []
         for r in reservas.data:
             horarios_ocupados.append({
                 "inicio": r["hora_inicio"],
-                "fin": r["hora_fin"]
+                "fin": r["hora_fin"],
+                "motivo": r.get("motivo", "Reservado")
             })
         
-        # Generar slots disponibles (cada 30 minutos)
+        # Calcular slots disponibles
         horarios_disponibles = self._calcular_slots_disponibles(
-            horario_inicio, horario_fin, horarios_ocupados
+            recurso["horario_inicio"],
+            recurso["horario_fin"],
+            horarios_ocupados
         )
         
         return {
@@ -148,28 +109,30 @@ class RecursoService:
     
     def _calcular_slots_disponibles(
         self,
-        horario_inicio: time,
-        horario_fin: time,
+        horario_inicio: str,
+        horario_fin: str,
         ocupados: List[dict]
     ) -> List[dict]:
-        """Calcula los slots de tiempo disponibles"""
+        """Calcula los slots de tiempo disponibles (cada hora)"""
         slots = []
-        slot_duracion = timedelta(minutes=30)
         
-        current = datetime.combine(date.today(), horario_inicio)
-        end = datetime.combine(date.today(), horario_fin)
+        # Parsear horarios
+        h_inicio = datetime.strptime(horario_inicio, "%H:%M:%S").time()
+        h_fin = datetime.strptime(horario_fin, "%H:%M:%S").time()
         
-        while current + slot_duracion <= end:
+        current = datetime.combine(date.today(), h_inicio)
+        end = datetime.combine(date.today(), h_fin)
+        
+        while current < end:
             slot_inicio = current.time()
-            slot_fin = (current + slot_duracion).time()
+            slot_fin = (current + timedelta(hours=1)).time()
             
-            # Verificar si el slot está ocupado
+            # Verificar si el slot esta ocupado
             ocupado = False
             for o in ocupados:
                 o_inicio = datetime.strptime(o["inicio"], "%H:%M:%S").time()
                 o_fin = datetime.strptime(o["fin"], "%H:%M:%S").time()
                 
-                # El slot está ocupado si hay solapamiento
                 if not (slot_fin <= o_inicio or slot_inicio >= o_fin):
                     ocupado = True
                     break
@@ -180,13 +143,13 @@ class RecursoService:
                     "fin": slot_fin.strftime("%H:%M")
                 })
             
-            current += slot_duracion
+            current += timedelta(hours=1)
         
         return slots
 
 
 class ReservaService:
-    """Servicio para gestión de reservas"""
+    """Servicio para gestion de reservas"""
     
     def __init__(self, db: Client):
         self.db = db
@@ -194,235 +157,165 @@ class ReservaService:
     
     async def crear_reserva(
         self,
-        reserva: ReservaCreate,
-        usuario_id: str
+        recurso_id: str,
+        usuario_id: str,
+        usuario_nombre: str,
+        usuario_email: str,
+        fecha: date,
+        hora_inicio: time,
+        hora_fin: time,
+        motivo: Optional[str] = None,
+        num_asistentes: int = 1
     ) -> Tuple[Optional[dict], Optional[str]]:
-        """
-        Crea una nueva reserva.
-        Retorna (reserva, None) si tiene éxito, o (None, mensaje_error) si falla.
-        """
-        # 1. Verificar que el recurso existe y está disponible
-        recurso = await self.recurso_service.obtener_recurso(reserva.recurso_id)
+        """Crea una nueva reserva"""
+        
+        # 1. Verificar que el recurso existe
+        recurso = await self.recurso_service.obtener_recurso(recurso_id)
         if not recurso:
             return None, "El recurso no existe"
         
-        if recurso["estado"] not in [EstadoRecurso.DISPONIBLE.value, "disponible"]:
-            return None, f"El recurso no está disponible (estado: {recurso['estado']})"
+        if recurso["estado"] != "disponible":
+            return None, f"El recurso no esta disponible (estado: {recurso['estado']})"
         
         # 2. Verificar que la fecha no sea pasada
-        hoy = date.today()
-        if reserva.fecha < hoy:
+        if fecha < date.today():
             return None, "No se pueden hacer reservas en fechas pasadas"
         
-        # 3. Verificar anticipación mínima
-        if reserva.fecha == hoy:
-            ahora = datetime.now().time()
-            min_hora = (datetime.combine(hoy, ahora) + timedelta(minutes=settings.ANTICIPACION_MINIMA_MINUTOS)).time()
-            if reserva.hora_inicio < min_hora:
-                return None, f"Debe reservar con al menos {settings.ANTICIPACION_MINIMA_MINUTOS} minutos de anticipación"
+        # 3. Verificar que el numero de asistentes no exceda la capacidad
+        if num_asistentes > recurso["capacidad"]:
+            return None, f"El numero de asistentes ({num_asistentes}) excede la capacidad del recurso ({recurso['capacidad']})"
         
-        # 4. Verificar anticipación máxima
-        max_fecha = hoy + timedelta(days=settings.ANTICIPACION_MAXIMA_DIAS)
-        if reserva.fecha > max_fecha:
-            return None, f"Solo puede reservar con máximo {settings.ANTICIPACION_MAXIMA_DIAS} días de anticipación"
-        
-        # 5. Verificar que el día de la semana esté habilitado
-        dia_semana = reserva.fecha.isoweekday()
-        if dia_semana not in recurso.get("dias_disponibles", [1, 2, 3, 4, 5]):
-            return None, "El recurso no está disponible este día de la semana"
-        
-        # 6. Verificar que esté dentro del horario del recurso
-        horario_inicio = datetime.strptime(recurso["horario_inicio"], "%H:%M:%S").time()
-        horario_fin = datetime.strptime(recurso["horario_fin"], "%H:%M:%S").time()
-        
-        if reserva.hora_inicio < horario_inicio or reserva.hora_fin > horario_fin:
-            return None, f"La reserva debe estar entre {horario_inicio} y {horario_fin}"
-        
-        # 7. Verificar duración mínima y máxima
-        duracion = datetime.combine(hoy, reserva.hora_fin) - datetime.combine(hoy, reserva.hora_inicio)
-        if duracion < timedelta(minutes=settings.TIEMPO_MINIMO_RESERVA_MINUTOS):
-            return None, f"La reserva mínima es de {settings.TIEMPO_MINIMO_RESERVA_MINUTOS} minutos"
-        if duracion > timedelta(hours=settings.TIEMPO_MAXIMO_RESERVA_HORAS):
-            return None, f"La reserva máxima es de {settings.TIEMPO_MAXIMO_RESERVA_HORAS} horas"
-        
-        # 8. Verificar conflictos con otras reservas
-        conflictos = self.db.table("reservas").select("id")\
-            .eq("recurso_id", reserva.recurso_id)\
-            .eq("fecha", reserva.fecha.isoformat())\
-            .not_.in_("estado", ["cancelada", "no_show"])\
+        # 4. Verificar que no haya conflictos con otras reservas
+        conflictos = self.db.table("reservas").select("id, hora_inicio, hora_fin")\
+            .eq("recurso_id", recurso_id)\
+            .eq("fecha", fecha.isoformat())\
+            .neq("estado", "cancelada")\
             .execute()
         
         for r in conflictos.data:
-            # Obtener detalles de la reserva existente
-            existente = self.db.table("reservas").select("hora_inicio, hora_fin")\
-                .eq("id", r["id"]).single().execute()
+            e_inicio = datetime.strptime(r["hora_inicio"], "%H:%M:%S").time()
+            e_fin = datetime.strptime(r["hora_fin"], "%H:%M:%S").time()
             
-            if existente.data:
-                e_inicio = datetime.strptime(existente.data["hora_inicio"], "%H:%M:%S").time()
-                e_fin = datetime.strptime(existente.data["hora_fin"], "%H:%M:%S").time()
-                
-                # Verificar solapamiento
-                if not (reserva.hora_fin <= e_inicio or reserva.hora_inicio >= e_fin):
-                    return None, "Ya existe una reserva en ese horario"
+            if not (hora_fin <= e_inicio or hora_inicio >= e_fin):
+                return None, f"Ya existe una reserva en ese horario ({r['hora_inicio']} - {r['hora_fin']})"
         
-        # 9. Verificar límite de reservas por día del usuario
-        reservas_usuario_hoy = self.db.table("reservas").select("id", count="exact")\
-            .eq("usuario_id", usuario_id)\
-            .eq("fecha", reserva.fecha.isoformat())\
-            .not_.in_("estado", ["cancelada", "no_show"])\
-            .execute()
-        
-        if reservas_usuario_hoy.count >= settings.MAX_RESERVAS_POR_DIA:
-            return None, f"Has alcanzado el límite de {settings.MAX_RESERVAS_POR_DIA} reservas por día"
-        
-        # 10. Crear la reserva
+        # 5. Crear la reserva
         data = {
             "usuario_id": usuario_id,
-            "recurso_id": reserva.recurso_id,
-            "fecha": reserva.fecha.isoformat(),
-            "hora_inicio": reserva.hora_inicio.isoformat(),
-            "hora_fin": reserva.hora_fin.isoformat(),
-            "estado": EstadoReserva.CONFIRMADA.value if not recurso.get("requiere_aprobacion") else EstadoReserva.PENDIENTE.value,
-            "motivo": reserva.motivo,
-            "notas": reserva.notas
+            "usuario_nombre": usuario_nombre,
+            "usuario_email": usuario_email,
+            "recurso_id": recurso_id,
+            "fecha": fecha.isoformat(),
+            "hora_inicio": hora_inicio.isoformat(),
+            "hora_fin": hora_fin.isoformat(),
+            "estado": "confirmada",
+            "motivo": motivo,
+            "num_asistentes_esperados": num_asistentes
         }
         
         response = self.db.table("reservas").insert(data).execute()
-        return response.data[0], None
+        
+        reserva = response.data[0]
+        reserva["recurso"] = recurso
+        
+        return reserva, None
     
     async def obtener_reserva(self, reserva_id: str) -> Optional[dict]:
-        """Obtiene una reserva por ID"""
+        """Obtiene una reserva por ID con info del recurso"""
         response = self.db.table("reservas").select("*").eq("id", reserva_id).single().execute()
+        
+        if response.data:
+            # Agregar info del recurso
+            recurso = await self.recurso_service.obtener_recurso(response.data["recurso_id"])
+            response.data["recurso"] = recurso
+            
+            # Contar check-ins
+            checkins = self.db.table("checkins").select("id", count="exact")\
+                .eq("reserva_id", reserva_id)\
+                .eq("estado", "exitoso")\
+                .execute()
+            response.data["checkins_realizados"] = checkins.count or 0
+            response.data["capacidad_total"] = recurso["capacidad"] if recurso else 0
+        
         return response.data
-    
-    async def obtener_reserva_detalle(self, reserva_id: str) -> Optional[dict]:
-        """Obtiene una reserva con detalles del recurso"""
-        reserva = await self.obtener_reserva(reserva_id)
-        if not reserva:
-            return None
-        
-        # Obtener recurso
-        recurso = await self.recurso_service.obtener_recurso(reserva["recurso_id"])
-        
-        # Obtener nombre de usuario
-        usuario = self.db.table("users").select("full_name")\
-            .eq("id", reserva["usuario_id"]).single().execute()
-        
-        reserva["recurso"] = recurso
-        reserva["usuario_nombre"] = usuario.data.get("full_name") if usuario.data else None
-        
-        return reserva
     
     async def listar_reservas_usuario(
         self,
         usuario_id: str,
-        filtros: Optional[FiltroReservas] = None,
+        estado: Optional[str] = None,
         page: int = 1,
-        page_size: int = 10
+        page_size: int = 20
     ) -> Tuple[List[dict], int]:
         """Lista las reservas de un usuario"""
         query = self.db.table("reservas").select("*", count="exact")\
             .eq("usuario_id", usuario_id)
         
-        if filtros:
-            if filtros.estado:
-                query = query.eq("estado", filtros.estado.value)
-            if filtros.recurso_id:
-                query = query.eq("recurso_id", filtros.recurso_id)
-            if filtros.fecha_desde:
-                query = query.gte("fecha", filtros.fecha_desde.isoformat())
-            if filtros.fecha_hasta:
-                query = query.lte("fecha", filtros.fecha_hasta.isoformat())
+        if estado:
+            query = query.eq("estado", estado)
         
-        # Paginación
         offset = (page - 1) * page_size
         query = query.range(offset, offset + page_size - 1)
         query = query.order("fecha", desc=True).order("hora_inicio", desc=True)
         
         response = query.execute()
         
-        # Agregar información del recurso a cada reserva
+        # Agregar info del recurso a cada reserva
         for reserva in response.data:
             recurso = await self.recurso_service.obtener_recurso(reserva["recurso_id"])
             reserva["recurso"] = recurso
         
         return response.data, response.count or 0
+    
+    async def listar_reservas_por_fecha(
+        self,
+        fecha: date,
+        tipo_recurso: Optional[str] = None
+    ) -> List[dict]:
+        """Lista todas las reservas de una fecha"""
+        query = self.db.table("reservas").select("*")\
+            .eq("fecha", fecha.isoformat())\
+            .neq("estado", "cancelada")
+        
+        response = query.execute()
+        
+        reservas = []
+        for reserva in response.data:
+            recurso = await self.recurso_service.obtener_recurso(reserva["recurso_id"])
+            if tipo_recurso and recurso and recurso["tipo"] != tipo_recurso:
+                continue
+            reserva["recurso"] = recurso
+            reservas.append(reserva)
+        
+        return reservas
     
     async def cancelar_reserva(
         self,
         reserva_id: str,
         usuario_id: str,
-        motivo: Optional[str] = None,
-        es_admin: bool = False
+        motivo: Optional[str] = None
     ) -> Tuple[bool, str]:
-        """
-        Cancela una reserva.
-        Retorna (True, mensaje) si tiene éxito, o (False, mensaje_error) si falla.
-        """
+        """Cancela una reserva"""
         reserva = await self.obtener_reserva(reserva_id)
         if not reserva:
             return False, "La reserva no existe"
         
-        # Verificar permisos
-        if not es_admin and reserva["usuario_id"] != usuario_id:
+        if reserva["usuario_id"] != usuario_id:
             return False, "No tienes permiso para cancelar esta reserva"
         
-        # Verificar estado
-        if reserva["estado"] in [EstadoReserva.CANCELADA.value, "cancelada"]:
-            return False, "La reserva ya está cancelada"
+        if reserva["estado"] == "cancelada":
+            return False, "La reserva ya esta cancelada"
         
-        if reserva["estado"] in [EstadoReserva.COMPLETADA.value, "completada"]:
-            return False, "No se puede cancelar una reserva completada"
-        
-        # Cancelar
         self.db.table("reservas").update({
-            "estado": EstadoReserva.CANCELADA.value,
+            "estado": "cancelada",
             "cancelado_at": datetime.now().isoformat(),
-            "cancelado_por": usuario_id,
             "motivo_cancelacion": motivo
         }).eq("id", reserva_id).execute()
         
         return True, "Reserva cancelada exitosamente"
-    
-    async def listar_todas_reservas(
-        self,
-        filtros: Optional[FiltroReservas] = None,
-        page: int = 1,
-        page_size: int = 10
-    ) -> Tuple[List[dict], int]:
-        """Lista todas las reservas (para admin)"""
-        query = self.db.table("reservas").select("*", count="exact")
-        
-        if filtros:
-            if filtros.estado:
-                query = query.eq("estado", filtros.estado.value)
-            if filtros.recurso_id:
-                query = query.eq("recurso_id", filtros.recurso_id)
-            if filtros.fecha_desde:
-                query = query.gte("fecha", filtros.fecha_desde.isoformat())
-            if filtros.fecha_hasta:
-                query = query.lte("fecha", filtros.fecha_hasta.isoformat())
-        
-        offset = (page - 1) * page_size
-        query = query.range(offset, offset + page_size - 1)
-        query = query.order("fecha", desc=True).order("hora_inicio", desc=True)
-        
-        response = query.execute()
-        
-        for reserva in response.data:
-            recurso = await self.recurso_service.obtener_recurso(reserva["recurso_id"])
-            reserva["recurso"] = recurso
-            
-            usuario = self.db.table("users").select("full_name, email")\
-                .eq("id", reserva["usuario_id"]).single().execute()
-            reserva["usuario_nombre"] = usuario.data.get("full_name") if usuario.data else None
-            reserva["usuario_email"] = usuario.data.get("email") if usuario.data else None
-        
-        return response.data, response.count or 0
 
 
 class CheckinService:
-    """Servicio para gestión de check-ins"""
+    """Servicio para gestion de check-ins con control de capacidad"""
     
     def __init__(self, db: Client):
         self.db = db
@@ -430,152 +323,169 @@ class CheckinService:
     
     async def realizar_checkin(
         self,
-        reserva_id: str,
+        codigo_qr: str,
         usuario_id: str,
-        qr_token: Optional[str] = None,
+        usuario_nombre: str,
+        usuario_email: str,
         dispositivo_info: Optional[str] = None
     ) -> Tuple[Optional[dict], Optional[str]]:
         """
-        Realiza el check-in de una reserva.
-        Retorna (checkin, None) si tiene éxito, o (None, mensaje_error) si falla.
+        Realiza el check-in escaneando un codigo QR.
+        Valida la capacidad del recurso.
         """
-        # 1. Obtener la reserva
-        reserva = await self.reserva_service.obtener_reserva(reserva_id)
-        if not reserva:
-            return None, "La reserva no existe"
         
-        # 2. Verificar que el usuario sea el dueño de la reserva
-        if reserva["usuario_id"] != usuario_id:
-            return None, "Esta reserva no te pertenece"
+        # 1. Validar el codigo QR
+        qr_info = self.db.table("recursos_qr").select("*, recursos(*)")\
+            .eq("codigo_qr", codigo_qr)\
+            .eq("activo", True)\
+            .single().execute()
         
-        # 3. Verificar estado de la reserva
-        if reserva["estado"] not in [EstadoReserva.CONFIRMADA.value, "confirmada", 
-                                      EstadoReserva.PENDIENTE.value, "pendiente"]:
-            return None, f"No se puede hacer check-in: la reserva está {reserva['estado']}"
+        if not qr_info.data:
+            return None, "Codigo QR invalido o inactivo"
         
-        # 4. Verificar que sea el día de la reserva
-        fecha_reserva = datetime.strptime(reserva["fecha"], "%Y-%m-%d").date()
-        if fecha_reserva != date.today():
-            return None, "Solo puedes hacer check-in el día de tu reserva"
+        recurso = qr_info.data.get("recursos")
+        if not recurso:
+            return None, "Recurso no encontrado"
         
-        # 5. Verificar ventana de tiempo para check-in
-        ahora = datetime.now()
-        hora_reserva = datetime.strptime(reserva["hora_inicio"], "%H:%M:%S")
-        hora_reserva_completa = datetime.combine(date.today(), hora_reserva.time())
+        # 2. Buscar reserva activa para hoy en este recurso
+        hoy = date.today()
+        ahora = datetime.now().time()
         
-        ventana_inicio = hora_reserva_completa - timedelta(minutes=settings.VENTANA_CHECKIN_MINUTOS)
-        ventana_fin = hora_reserva_completa + timedelta(minutes=settings.VENTANA_CHECKIN_MINUTOS)
+        # Buscar reservas de hoy que esten en curso o confirmadas
+        reservas_hoy = self.db.table("reservas").select("*")\
+            .eq("recurso_id", recurso["id"])\
+            .eq("fecha", hoy.isoformat())\
+            .in_("estado", ["confirmada", "en_curso"])\
+            .execute()
         
-        if ahora < ventana_inicio:
-            return None, f"El check-in está disponible desde {ventana_inicio.strftime('%H:%M')}"
+        reserva_activa = None
+        for r in reservas_hoy.data:
+            h_inicio = datetime.strptime(r["hora_inicio"], "%H:%M:%S").time()
+            h_fin = datetime.strptime(r["hora_fin"], "%H:%M:%S").time()
+            
+            # Permitir check-in 15 minutos antes hasta el fin de la reserva
+            h_inicio_con_margen = (datetime.combine(hoy, h_inicio) - timedelta(minutes=15)).time()
+            
+            if h_inicio_con_margen <= ahora <= h_fin:
+                reserva_activa = r
+                break
         
-        if ahora > ventana_fin:
-            return None, "La ventana de check-in ha expirado"
+        if not reserva_activa:
+            return None, f"No hay ninguna reserva activa en este momento para {recurso['nombre']}. Verifica el horario de tu reserva."
         
-        # 6. Verificar que no haya check-in duplicado
+        # 3. Verificar si el usuario ya hizo check-in
         checkin_existente = self.db.table("checkins").select("id")\
-            .eq("reserva_id", reserva_id)\
-            .eq("es_valido", True)\
+            .eq("reserva_id", reserva_activa["id"])\
+            .eq("usuario_id", usuario_id)\
+            .eq("estado", "exitoso")\
             .execute()
         
         if checkin_existente.data:
-            return None, "Ya realizaste check-in para esta reserva"
+            return None, "Ya realizaste check-in para esta reserva. No puedes registrarte dos veces."
         
-        # 7. Si hay QR token, validarlo
-        qr_valido = True
-        if qr_token:
-            qr_valido = await self._validar_qr_token(qr_token, reserva["recurso_id"])
-            if not qr_valido:
-                # Registrar intento inválido pero no bloquear
-                pass
+        # 4. Contar check-ins actuales vs capacidad
+        checkins_actuales = self.db.table("checkins").select("id", count="exact")\
+            .eq("reserva_id", reserva_activa["id"])\
+            .eq("estado", "exitoso")\
+            .execute()
         
-        # 8. Crear el check-in
+        num_checkins = checkins_actuales.count or 0
+        capacidad = recurso["capacidad"]
+        
+        if num_checkins >= capacidad:
+            # Registrar intento rechazado
+            self.db.table("checkins").insert({
+                "reserva_id": reserva_activa["id"],
+                "usuario_id": usuario_id,
+                "usuario_nombre": usuario_nombre,
+                "usuario_email": usuario_email,
+                "numero_checkin": num_checkins + 1,
+                "estado": "rechazado",
+                "mensaje": f"Capacidad completa ({capacidad}/{capacidad})",
+                "dispositivo_info": dispositivo_info
+            }).execute()
+            
+            return None, f"¡Lo sentimos! La capacidad de {recurso['nombre']} esta completa ({capacidad}/{capacidad} personas). No es posible registrar mas asistentes."
+        
+        # 5. Realizar check-in exitoso
+        nuevo_numero = num_checkins + 1
+        
         checkin_data = {
-            "reserva_id": reserva_id,
+            "reserva_id": reserva_activa["id"],
             "usuario_id": usuario_id,
-            "metodo": "qr" if qr_token else "manual",
-            "ubicacion_validada": qr_valido,
-            "dispositivo_info": dispositivo_info,
-            "es_valido": True
+            "usuario_nombre": usuario_nombre,
+            "usuario_email": usuario_email,
+            "numero_checkin": nuevo_numero,
+            "estado": "exitoso",
+            "mensaje": f"Check-in exitoso ({nuevo_numero}/{capacidad})",
+            "dispositivo_info": dispositivo_info
         }
         
         response = self.db.table("checkins").insert(checkin_data).execute()
         
-        # 9. Actualizar estado de la reserva
-        self.db.table("reservas").update({
-            "estado": EstadoReserva.EN_CURSO.value
-        }).eq("id", reserva_id).execute()
+        # 6. Si es el primer check-in, actualizar estado de reserva a "en_curso"
+        if reserva_activa["estado"] == "confirmada":
+            self.db.table("reservas").update({"estado": "en_curso"})\
+                .eq("id", reserva_activa["id"]).execute()
         
+        # 7. Preparar respuesta
         checkin = response.data[0]
-        checkin["mensaje"] = "Check-in realizado exitosamente"
         
-        return checkin, None
+        # Mensaje segun cuantos quedan
+        lugares_restantes = capacidad - nuevo_numero
+        if lugares_restantes == 0:
+            mensaje_capacidad = "¡Capacidad completa! No hay mas lugares disponibles."
+        elif lugares_restantes <= 3:
+            mensaje_capacidad = f"¡Quedan solo {lugares_restantes} lugares!"
+        else:
+            mensaje_capacidad = f"Hay {lugares_restantes} lugares disponibles."
+        
+        return {
+            "checkin": checkin,
+            "recurso": recurso,
+            "reserva": reserva_activa,
+            "numero_checkin": nuevo_numero,
+            "capacidad_total": capacidad,
+            "lugares_restantes": lugares_restantes,
+            "mensaje": f"✅ ¡Bienvenido/a {usuario_nombre}! Check-in #{nuevo_numero} de {capacidad} registrado en {recurso['nombre']}. {mensaje_capacidad}",
+            "porcentaje_ocupacion": round((nuevo_numero / capacidad) * 100, 1)
+        }, None
     
-    async def _validar_qr_token(self, token: str, recurso_id: str) -> bool:
-        """Valida un token QR contra el recurso"""
-        token_hash = hashlib.sha256(token.encode()).hexdigest()
-        
-        qr = self.db.table("recursos_qr").select("*")\
-            .eq("token_hash", token_hash)\
-            .eq("recurso_id", recurso_id)\
-            .eq("activo", True)\
-            .single().execute()
-        
-        if not qr.data:
-            return False
-        
-        # Verificar expiración
-        if qr.data.get("fecha_expiracion"):
-            expiracion = datetime.fromisoformat(qr.data["fecha_expiracion"].replace("Z", "+00:00"))
-            if expiracion < datetime.now(expiracion.tzinfo):
-                return False
-        
-        return True
-    
-    async def validar_checkin(
-        self,
-        reserva_id: str,
-        usuario_id: str
-    ) -> dict:
-        """Valida si se puede hacer check-in sin ejecutarlo"""
+    async def obtener_estado_checkins(self, reserva_id: str) -> dict:
+        """Obtiene el estado actual de check-ins de una reserva"""
         reserva = await self.reserva_service.obtener_reserva(reserva_id)
-        
         if not reserva:
-            return {"puede_checkin": False, "mensaje": "La reserva no existe", "reserva": None}
+            return None
         
-        if reserva["usuario_id"] != usuario_id:
-            return {"puede_checkin": False, "mensaje": "Esta reserva no te pertenece", "reserva": None}
+        checkins = self.db.table("checkins").select("*")\
+            .eq("reserva_id", reserva_id)\
+            .order("numero_checkin")\
+            .execute()
         
-        fecha_reserva = datetime.strptime(reserva["fecha"], "%Y-%m-%d").date()
-        if fecha_reserva != date.today():
-            return {"puede_checkin": False, "mensaje": "Solo puedes hacer check-in el día de tu reserva", "reserva": reserva}
+        exitosos = [c for c in checkins.data if c["estado"] == "exitoso"]
+        rechazados = [c for c in checkins.data if c["estado"] == "rechazado"]
         
-        ahora = datetime.now()
-        hora_reserva = datetime.strptime(reserva["hora_inicio"], "%H:%M:%S")
-        hora_reserva_completa = datetime.combine(date.today(), hora_reserva.time())
+        capacidad = reserva["recurso"]["capacidad"] if reserva.get("recurso") else 1
         
-        ventana_inicio = hora_reserva_completa - timedelta(minutes=settings.VENTANA_CHECKIN_MINUTOS)
-        ventana_fin = hora_reserva_completa + timedelta(minutes=settings.VENTANA_CHECKIN_MINUTOS)
-        
-        if ahora < ventana_inicio:
-            return {
-                "puede_checkin": False, 
-                "mensaje": f"Check-in disponible desde {ventana_inicio.strftime('%H:%M')}",
-                "reserva": reserva
-            }
-        
-        if ahora > ventana_fin:
-            return {"puede_checkin": False, "mensaje": "La ventana de check-in ha expirado", "reserva": reserva}
-        
-        return {"puede_checkin": True, "mensaje": "Puedes realizar check-in", "reserva": reserva}
+        return {
+            "reserva": reserva,
+            "capacidad_total": capacidad,
+            "checkins_exitosos": len(exitosos),
+            "checkins_rechazados": len(rechazados),
+            "lugares_disponibles": max(0, capacidad - len(exitosos)),
+            "porcentaje_ocupacion": round((len(exitosos) / capacidad) * 100, 1) if capacidad > 0 else 0,
+            "lista_asistentes": exitosos,
+            "lista_rechazados": rechazados,
+            "esta_lleno": len(exitosos) >= capacidad
+        }
     
-    async def obtener_historial_checkins(
+    async def listar_checkins_usuario(
         self,
         usuario_id: str,
         page: int = 1,
-        page_size: int = 10
+        page_size: int = 20
     ) -> Tuple[List[dict], int]:
-        """Obtiene el historial de check-ins de un usuario"""
+        """Lista los check-ins de un usuario"""
         offset = (page - 1) * page_size
         
         response = self.db.table("checkins").select("*", count="exact")\
@@ -588,59 +498,24 @@ class CheckinService:
 
 
 class QRService:
-    """Servicio para gestión de códigos QR de recursos"""
+    """Servicio para gestion de codigos QR"""
     
     def __init__(self, db: Client):
         self.db = db
     
-    async def generar_qr_recurso(
-        self,
-        recurso_id: str,
-        duracion_horas: int = 24
-    ) -> Tuple[Optional[dict], Optional[str]]:
-        """Genera un código QR para un recurso"""
-        # Verificar que el recurso existe
-        recurso = self.db.table("recursos").select("id, nombre")\
-            .eq("id", recurso_id).single().execute()
+    async def obtener_qr_recurso(self, recurso_id: str) -> Optional[dict]:
+        """Obtiene el QR de un recurso"""
+        response = self.db.table("recursos_qr").select("*")\
+            .eq("recurso_id", recurso_id)\
+            .eq("activo", True)\
+            .single().execute()
         
-        if not recurso.data:
-            return None, "El recurso no existe"
+        return response.data
+    
+    async def listar_todos_qr(self) -> List[dict]:
+        """Lista todos los codigos QR con info del recurso"""
+        response = self.db.table("recursos_qr").select("*, recursos(*)")\
+            .eq("activo", True)\
+            .execute()
         
-        # Generar token único
-        token = secrets.token_urlsafe(32)
-        token_hash = hashlib.sha256(token.encode()).hexdigest()
-        
-        # Fecha de expiración
-        expiracion = datetime.now() + timedelta(hours=duracion_horas)
-        
-        # Desactivar QRs anteriores del recurso
-        self.db.table("recursos_qr").update({"activo": False})\
-            .eq("recurso_id", recurso_id).execute()
-        
-        # Crear nuevo QR en la base de datos
-        qr_data = {
-            "recurso_id": recurso_id,
-            "token_hash": token_hash,
-            "fecha_expiracion": expiracion.isoformat(),
-            "activo": True
-        }
-        
-        response = self.db.table("recursos_qr").insert(qr_data).execute()
-        
-        # Generar imagen QR
-        qr_content = f"CAMPUS360:CHECKIN:{recurso_id}:{token}"
-        qr_image = qrcode.make(qr_content)
-        
-        # Convertir a base64
-        buffer = io.BytesIO()
-        qr_image.save(buffer, format="PNG")
-        qr_base64 = base64.b64encode(buffer.getvalue()).decode()
-        
-        return {
-            "id": response.data[0]["id"],
-            "recurso_id": recurso_id,
-            "recurso_nombre": recurso.data["nombre"],
-            "qr_code_base64": qr_base64,
-            "fecha_expiracion": expiracion.isoformat(),
-            "activo": True
-        }, None
+        return response.data

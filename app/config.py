@@ -1,36 +1,33 @@
+"""
+Configuracion del microservicio
+"""
 from pydantic_settings import BaseSettings
 from functools import lru_cache
 
 
 class Settings(BaseSettings):
-    """Configuración de la aplicación"""
+    """Configuracion de la aplicacion"""
     
-    # Información del servicio
-    APP_NAME: str = "CAMPUS360 - Módulo de Reservas"
-    APP_VERSION: str = "1.0.0"
-    DEBUG: bool = False
+    # Informacion del servicio
+    APP_NAME: str = "CAMPUS360 - Sistema de Reservas"
+    APP_VERSION: str = "2.0.0"
+    DEBUG: bool = True
     
     # Supabase
     SUPABASE_URL: str
-    SUPABASE_KEY: str  # anon/public key
-    SUPABASE_SERVICE_KEY: str = ""  # service role key (opcional, para operaciones admin)
+    SUPABASE_KEY: str
     
-    # JWT (debe coincidir con el módulo de autenticación)
-    JWT_SECRET_KEY: str
+    # JWT (para integracion con modulo de autenticacion)
+    JWT_SECRET_KEY: str = "clave_secreta_temporal"
     JWT_ALGORITHM: str = "HS256"
     
-    # Configuración de reservas
-    MAX_RESERVAS_POR_DIA: int = 3  # Máximo de reservas por usuario por día
-    TIEMPO_MINIMO_RESERVA_MINUTOS: int = 30
-    TIEMPO_MAXIMO_RESERVA_HORAS: int = 4
-    ANTICIPACION_MINIMA_MINUTOS: int = 15  # Mínimo tiempo de anticipación para reservar
-    ANTICIPACION_MAXIMA_DIAS: int = 30  # Máximo días de anticipación
+    # Configuracion de reservas
+    MAX_RESERVAS_POR_DIA: int = 5
+    ANTICIPACION_MINIMA_MINUTOS: int = 15
+    ANTICIPACION_MAXIMA_DIAS: int = 30
     
     # Check-in
-    VENTANA_CHECKIN_MINUTOS: int = 15  # Minutos antes/después de la hora de reserva
-    
-    # CORS
-    CORS_ORIGINS: list = ["http://localhost:5173", "http://localhost:3000", "http://127.0.0.1:5173"]
+    VENTANA_CHECKIN_MINUTOS: int = 15
     
     class Config:
         env_file = ".env"
@@ -40,5 +37,4 @@ class Settings(BaseSettings):
 
 @lru_cache()
 def get_settings() -> Settings:
-    """Obtiene la configuración cacheada"""
     return Settings()
