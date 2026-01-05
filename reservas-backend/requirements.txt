@@ -1,0 +1,21 @@
+# FastAPI Core
+fastapi
+uvicorn[standard]
+
+# Pydantic & Settings
+pydantic[email]
+pydantic-settings
+
+# Database & ORM
+prisma
+
+# Authentication
+python-jose[cryptography]
+passlib[bcrypt]
+python-multipart
+
+# Environment
+python-dotenv
+
+# QR Code Generation
+qrcode[pil]

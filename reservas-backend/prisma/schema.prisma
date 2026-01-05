@@ -1,14 +1,174 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
-
 generator client {
-  provider = "prisma-client-js"
+  provider = "prisma-client-py"
 }
 
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
+}
+
+model Recurso {
+  id               String        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  codigo           String        @unique
+  nombre           String
+  descripcion      String?
+  tipo             String
+  ubicacion        String
+  capacidad        Int?          @default(1)
+  equipamiento     String[]
+  estado           String?       @default("disponible")
+  imagen_url       String?
+  horario_inicio   DateTime?     @default(dbgenerated("'07:00:00'::time without time zone")) @db.Time(6)
+  horario_fin      DateTime?     @default(dbgenerated("'21:00:00'::time without time zone")) @db.Time(6)
+  dias_disponibles Int[]         @default([1, 2, 3, 4, 5, 6])
+  created_at       DateTime?     @default(now()) @db.Timestamptz(6)
+  updated_at       DateTime?     @default(now()) @updatedAt @db.Timestamptz(6)
+  recursos_qr      recursos_qr[]
+  reservas         Reserva[]
+
+  @@index([codigo], map: "idx_recursos_codigo")
+  @@index([tipo], map: "idx_recursos_tipo")
+  @@map("recursos")
+}
+
+model Reserva {
+  id                       String     @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  usuario_id               String
+  usuario_nombre           String?
+  usuario_email            String?
+  recurso_id               String     @db.Uuid
+  fecha                    DateTime   @db.Date
+  hora_inicio              DateTime   @db.Time(6)
+  hora_fin                 DateTime   @db.Time(6)
+  estado                   String?    @default("confirmada")
+  motivo                   String?
+  num_asistentes_esperados Int?       @default(1)
+  notas                    String?
+  created_at               DateTime?  @default(now()) @db.Timestamptz(6)
+  updated_at               DateTime?  @default(now()) @updatedAt @db.Timestamptz(6)
+  cancelado_at             DateTime?  @db.Timestamptz(6)
+  motivo_cancelacion       String?
+  checkins                 checkins[]
+  recurso                  Recurso    @relation(fields: [recurso_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([estado], map: "idx_reservas_estado")
+  @@index([fecha], map: "idx_reservas_fecha")
+  @@index([recurso_id], map: "idx_reservas_recurso")
+  @@index([usuario_id], map: "idx_reservas_usuario")
+  @@map("reservas")
+}
+
+model access_logs {
+  id            Int      @id @default(autoincrement())
+  user_id       String
+  location_code String
+  timestamp     DateTime @default(now())
+  users         users    @relation(fields: [user_id], references: [id], onDelete: Cascade)
+}
+
+model asistencias {
+  id               Int      @id @default(autoincrement())
+  fecha_registro   DateTime @default(now())
+  estado           String   @default("Presente")
+  dispositivo_info String?
+  estudiante_id    String
+  clase_id         String
+  clases           clases   @relation(fields: [clase_id], references: [id], onDelete: Cascade)
+  users            users    @relation(fields: [estudiante_id], references: [id], onDelete: Cascade)
+
+  @@unique([estudiante_id, clase_id])
+}
+
+/// This table contains check constraints and requires additional setup for migrations. Visit https://pris.ly/d/check-constraints for more info.
+model checkins {
+  id               String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  reserva_id       String    @db.Uuid
+  usuario_id       String
+  usuario_nombre   String?
+  usuario_email    String?
+  timestamp        DateTime? @default(now()) @db.Timestamptz(6)
+  numero_checkin   Int?
+  estado           String?   @default("exitoso")
+  mensaje          String?
+  dispositivo_info String?
+  created_at       DateTime? @default(now()) @db.Timestamptz(6)
+  reservas         Reserva   @relation(fields: [reserva_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+
+  @@index([reserva_id], map: "idx_checkins_reserva")
+  @@index([usuario_id], map: "idx_checkins_usuario")
+}
+
+model clases {
+  id             String        @id
+  nombre_materia String
+  aula           String
+  horario_inicio DateTime
+  profesor_id    String
+  created_at     DateTime      @default(now())
+  asistencias    asistencias[]
+  users          users         @relation(fields: [profesor_id], references: [id], onDelete: Cascade)
+  tokens_qr      tokens_qr[]
+}
+
+model recursos_qr {
+  id            String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  recurso_id    String    @db.Uuid
+  codigo_qr     String    @unique
+  token_secreto String
+  activo        Boolean?  @default(true)
+  created_at    DateTime? @default(now()) @db.Timestamptz(6)
+  recursos      Recurso   @relation(fields: [recurso_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+}
+
+model tokens_qr {
+  id               String   @id
+  token_hash       String   @unique
+  fecha_generacion DateTime @default(now())
+  fecha_expiracion DateTime
+  clase_id         String
+  clases           clases   @relation(fields: [clase_id], references: [id], onDelete: Cascade)
+}
+
+model users {
+  id            String        @id
+  email         String        @unique
+  password_hash String
+  full_name     String
+  role          String        @default("student")
+  created_at    DateTime      @default(now())
+  access_logs   access_logs[]
+  asistencias   asistencias[]
+  clases        clases[]
+}
+
+enum estado_recurso {
+  disponible
+  ocupado
+  mantenimiento
+  fuera_servicio
+}
+
+enum estado_reserva {
+  pendiente
+  confirmada
+  en_curso
+  completada
+  cancelada
+  no_show
+}
+
+enum tipo_equipo {
+  proyector
+  laptop
+  camara
+  tablet
+  otro
+}
+
+enum tipo_recurso {
+  sala_estudio
+  laboratorio
+  equipo
+  parqueadero
+  cubiculo
 }
