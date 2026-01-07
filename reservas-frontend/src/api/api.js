@@ -1,5 +1,20 @@
-import { http } from "./http";
+import http from "./http"; // Cambiado: default import en lugar de named
 
+export const getRecursosPorTipo = (tipo) => {
+  return http.get(`/recursos?tipo=${tipo}`);
+};
+
+export const getRecurso = (id) => {
+  return http.get(`/recursos/${id}`);
+};
+
+export const getDisponibilidad = (tipo, fecha) => {
+  return http.get(`/recursos/disponibilidad`, {
+    params: { tipo, fecha }
+  });
+};
+
+// También puedes mantener tu API object si lo prefieres
 export const RecursosAPI = {
   listar: (params) => http.get("/recursos", { params }).then(r => r.data),
   obtener: (id) => http.get(`/recursos/${id}`).then(r => r.data),
