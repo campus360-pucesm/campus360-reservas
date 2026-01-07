@@ -21,7 +21,7 @@ router = APIRouter(
 class CheckinRequest(BaseModel):
     """Datos para realizar check-in"""
     codigo_qr: str = Field(..., description="Codigo QR escaneado (ej: QR-LAB-001)")
-    usuario_id: str = Field(..., description="ID del usuario")
+    usuario_id: str = Field(..., description="ID del usuario (debe existir en tabla users)")
     usuario_nombre: str = Field(..., description="Nombre del usuario")
     usuario_email: str = Field(..., description="Email del usuario")
     dispositivo_info: Optional[str] = Field(None, description="Info del dispositivo")
@@ -30,10 +30,10 @@ class CheckinRequest(BaseModel):
         json_schema_extra = {
             "example": {
                 "codigo_qr": "QR-LAB-001",
-                "usuario_id": "user-123",
-                "usuario_nombre": "Maria Garcia",
-                "usuario_email": "maria@universidad.edu",
-                "dispositivo_info": "iPhone 15 - Safari"
+                "usuario_id": "0d16047f-b063-46f2-b46e-867c51fa14ae",
+                "usuario_nombre": "Luis",
+                "usuario_email": "luis@gmail.com",
+                "dispositivo_info": "Chrome - Windows"
             }
         }
 
@@ -194,6 +194,8 @@ async def simular_checkin(
     """
     Endpoint de prueba para simular un escaneo de QR.
     Muestra que recurso corresponde y si hay reserva activa.
+    
+    Usar para probar antes de integrar con el modulo de QR.
     """
     # Buscar el QR
     qr_info = db.table("recursos_qr").select("*, recursos(*)")\
@@ -230,6 +232,7 @@ async def simular_checkin(
         "success": True,
         "codigo_escaneado": codigo_qr,
         "recurso": {
+            "id": recurso.get("id"),
             "codigo": recurso.get("codigo"),
             "nombre": recurso.get("nombre"),
             "tipo": recurso.get("tipo"),

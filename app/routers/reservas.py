@@ -21,11 +21,11 @@ router = APIRouter(
 
 class CrearReservaRequest(BaseModel):
     """Datos para crear una nueva reserva"""
-    recurso_id: str = Field(..., description="ID del recurso a reservar")
+    recurso_id: str = Field(..., description="UUID del recurso a reservar")
     fecha: date = Field(..., description="Fecha de la reserva (YYYY-MM-DD)")
     hora_inicio: str = Field(..., description="Hora de inicio (HH:MM)")
     hora_fin: str = Field(..., description="Hora de fin (HH:MM)")
-    usuario_id: str = Field(..., description="ID del usuario")
+    usuario_id: str = Field(..., description="ID del usuario (debe existir en tabla users)")
     usuario_nombre: str = Field(..., description="Nombre del usuario")
     usuario_email: str = Field(..., description="Email del usuario")
     motivo: Optional[str] = Field(None, description="Motivo de la reserva")
@@ -38,11 +38,11 @@ class CrearReservaRequest(BaseModel):
                 "fecha": "2025-01-20",
                 "hora_inicio": "10:00",
                 "hora_fin": "12:00",
-                "usuario_id": "user-123",
-                "usuario_nombre": "Juan Perez",
-                "usuario_email": "juan@universidad.edu",
-                "motivo": "Clase de programacion",
-                "num_asistentes": 20
+                "usuario_id": "0d16047f-b063-46f2-b46e-867c51fa14ae",
+                "usuario_nombre": "Luis",
+                "usuario_email": "luis@gmail.com",
+                "motivo": "Reunion de estudio",
+                "num_asistentes": 5
             }
         }
 
@@ -64,6 +64,7 @@ async def crear_reserva(
     
     El sistema validara:
     - Que el recurso exista y este disponible
+    - Que el usuario exista en la tabla users
     - Que no haya conflictos de horario
     - Que el numero de asistentes no exceda la capacidad
     """
@@ -100,7 +101,7 @@ async def crear_reserva(
 
 @router.get("/")
 async def listar_reservas(
-    usuario_id: Optional[str] = Query(None, description="Filtrar por usuario"),
+    usuario_id: Optional[str] = Query(None, description="Filtrar por ID de usuario (de tabla users)"),
     fecha: Optional[date] = Query(None, description="Filtrar por fecha"),
     tipo_recurso: Optional[str] = Query(None, description="Filtrar por tipo de recurso"),
     estado: Optional[str] = Query(None, description="Filtrar por estado"),
@@ -204,7 +205,7 @@ async def obtener_reserva(
 @router.delete("/{reserva_id}")
 async def cancelar_reserva(
     reserva_id: str,
-    usuario_id: str = Query(..., description="ID del usuario que cancela"),
+    usuario_id: str = Query(..., description="ID del usuario que cancela (de tabla users)"),
     motivo: Optional[str] = Query(None, description="Motivo de cancelacion"),
     db: Client = Depends(get_supabase)
 ):
