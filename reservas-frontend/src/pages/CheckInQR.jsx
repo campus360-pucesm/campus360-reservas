@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { realizarCheckin } from "../api/checkin.api";
+import { CheckinAPI } from "../api/checkin.api";
 
 const CheckInQR = () => {
   const location = useLocation();
@@ -16,8 +16,8 @@ const CheckInQR = () => {
     setLoading(true);
     setError(null);
     try {
-      const response = await realizarCheckin(codigo);
-      setResultado(response.data);
+      const response = await CheckinAPI.realizar({ codigo_qr: codigo });
+      setResultado(response);
     } catch (err) {
       setError(err.response?.data?.message || "Código inválido o expirado");
     } finally {
