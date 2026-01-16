@@ -6,9 +6,7 @@ from enum import Enum
 from app.models import TipoRecurso, TipoEquipo, EstadoRecurso, EstadoReserva
 
 
-# ============================================
 # SCHEMAS DE RECURSOS
-# ============================================
 
 class RecursoBase(BaseModel):
     """Schema base para recursos"""
@@ -84,9 +82,7 @@ class RecursoDisponibilidad(BaseModel):
     horarios_ocupados: List[dict]
 
 
-# ============================================
 # SCHEMAS DE RESERVAS
-# ============================================
 
 class ReservaBase(BaseModel):
     """Schema base para reservas"""
@@ -152,9 +148,7 @@ class ReservaDetalleResponse(ReservaResponse):
     usuario_nombre: Optional[str] = None
 
 
-# ============================================
 # SCHEMAS DE CHECK-IN
-# ============================================
 
 class CheckinCreate(BaseModel):
     """Schema para realizar check-in"""
@@ -185,9 +179,7 @@ class CheckinValidacion(BaseModel):
     reserva: Optional[ReservaResponse] = None
 
 
-# ============================================
 # SCHEMAS DE FILTROS Y PAGINACIÓN
-# ============================================
 
 class FiltroRecursos(BaseModel):
     """Filtros para buscar recursos"""
@@ -225,9 +217,7 @@ class PaginatedResponse(BaseModel):
     total_pages: int
 
 
-# ============================================
 # SCHEMAS DE RESPUESTAS GENERALES
-# ============================================
 
 class MensajeResponse(BaseModel):
     """Respuesta simple con mensaje"""
@@ -241,9 +231,7 @@ class ErrorResponse(BaseModel):
     error_code: Optional[str] = None
 
 
-# ============================================
 # SCHEMAS PARA QR
-# ============================================
 
 class RecursoQRCreate(BaseModel):
     """Schema para crear un QR de recurso"""

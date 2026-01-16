@@ -12,7 +12,23 @@ from app.config import get_settings
 
 settings = get_settings()
 
-
+class UserService:
+    """Servicio para obtener datos de usuarios"""
+    
+    def __init__(self, db: Client):
+        self.db = db
+    
+    async def obtener_usuario(self, usuario_id: str) -> Optional[dict]:
+        """Obtiene un usuario por ID desde la tabla users"""
+        try:
+            response = self.db.table("users").select("id, email, full_name, role")\
+                .eq("id", usuario_id)\
+                .single()\
+                .execute()
+            return response.data
+        except Exception:
+            return None
+        
 class RecursoService:
     """Servicio para gestion de recursos"""
     

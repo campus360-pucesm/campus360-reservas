@@ -85,10 +85,10 @@ pip install -r requirements.txt
 ### 5. Ejecutar el servidor
 
 ```bash
-python -m uvicorn app.main:app --reload
+python -m uvicorn app.main:app --reload --port 8001
 ```
 
-El servidor estará disponible en `http://localhost:8000`
+El servidor estará disponible en `http://localhost:8001`
 
 ## Documentación de la API
 
